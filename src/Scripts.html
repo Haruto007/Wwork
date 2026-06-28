@@ -1,0 +1,784 @@
+<script>
+// ---- GAS API ラッパー ----
+function gasRun(fn) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function(resolve, reject) {
+    var runner = google.script.run
+      .withSuccessHandler(function(result) {
+        if (result && result.success === false) {
+          reject(new Error(result.error || '不明なエラー'));
+        } else {
+          resolve(result);
+        }
+      })
+      .withFailureHandler(function(err) {
+        reject(new Error(err.message || String(err)));
+      });
+    runner[fn].apply(runner, args);
+  });
+}
+
+// ---- フォーマット ----
+function fmtCurrency(v) {
+  if (v == null || v === '') return '-';
+  return '¥' + Number(v).toLocaleString('ja-JP');
+}
+function fmtHours(v) {
+  if (!v || Number(v) === 0) return '-';
+  return Number(v) + 'h';
+}
+function fmtDate(v) { return v || '-'; }
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function truncate(s, n) {
+  s = String(s || '');
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+function statusBadge(s) {
+  var map = { 'ステイ':'badge-stay','完了':'badge-done','不採用':'badge-reject','辞退':'badge-decline','連絡なし':'badge-none' };
+  return '<span class="badge ' + (map[s] || 'badge-none') + '">' + escHtml(s || '-') + '</span>';
+}
+
+// ---- アプリ状態 ----
+var APP = {
+  masterData: { platforms: [], types: [], statuses: [] },
+  projects: [],
+  dashYear:  new Date().getFullYear(),
+  dashMonth: new Date().getMonth() + 1,
+  finYear:   new Date().getFullYear(),
+  finMonth:  new Date().getMonth() + 1,
+  filters: { tab:'all', platform:'', type:'', contact:'', keyword:'', sortBy:'proposalDate', sortDir:'desc' },
+  charts: {}
+};
+
+// ---- ナビゲーション ----
+function navigate(view, params) {
+  params = params || {};
+  document.querySelectorAll('.view').forEach(function(el){ el.style.display='none'; });
+  var viewEl = document.getElementById('view-' + view);
+  if (viewEl) viewEl.style.display = 'block';
+
+  document.querySelectorAll('.nav-item').forEach(function(el){ el.classList.remove('active'); });
+  var navKey = view.split('-')[0];
+  var navEl = document.getElementById('nav-' + navKey);
+  if (navEl) navEl.classList.add('active');
+
+  if (view === 'dashboard')       renderDashboard();
+  else if (view === 'projects')   { if (params.tab) APP.filters.tab = params.tab; renderProjectList(); }
+  else if (view === 'project-form')   renderProjectForm(params);
+  else if (view === 'project-detail') renderProjectDetail(params.id);
+  else if (view === 'finance')    renderFinance();
+  else if (view === 'settings')   renderSettings();
+}
+
+// ==================================================================
+// DASHBOARD
+// ==================================================================
+function renderDashboard() {
+  showLoading(true);
+  gasRun('getDashboardData', APP.dashYear, APP.dashMonth).then(function(r) {
+    var d = r.data;
+    var el = document.getElementById('view-dashboard');
+    var months = ['1月','2月','3月','4月','5月','6月','7月','8月','9月','10月','11月','12月'];
+    var py = APP.dashYear, pm = APP.dashMonth - 1; if (pm < 1) { pm = 12; py--; }
+    var ny = APP.dashYear, nm = APP.dashMonth + 1; if (nm > 12) { nm = 1; ny++; }
+
+    var html = '<div class="page-header"><div class="page-title">ダッシュボード</div></div>';
+
+    // 月切り替え
+    html += '<div class="card"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+      + '<button class="btn btn-secondary btn-sm" onclick="setDashPeriod(' + py + ',' + pm + ')">前月</button>'
+      + '<strong style="font-size:15px;">' + APP.dashYear + '年' + APP.dashMonth + '月</strong>'
+      + '<button class="btn btn-secondary btn-sm" onclick="setDashPeriod(' + ny + ',' + nm + ')">翌月</button>'
+      + '<span style="color:var(--gray-3);">|</span>'
+      + '<button class="btn btn-secondary btn-sm" onclick="setDashPeriod(' + (APP.dashYear-1) + ',' + APP.dashMonth + ')">' + (APP.dashYear-1) + '年</button>'
+      + '<button class="btn btn-secondary btn-sm" onclick="setDashPeriod(' + (APP.dashYear+1) + ',' + APP.dashMonth + ')">' + (APP.dashYear+1) + '年</button>'
+      + '</div></div>';
+
+    // 月次サマリー
+    var m = d.monthly;
+    html += '<div class="card"><div class="card-title">' + APP.dashYear + '年' + APP.dashMonth + '月 月次サマリー</div>'
+      + '<div class="stats-grid">'
+      + mkStat('収入', fmtCurrency(m.revenue), '', 'highlight')
+      + mkStat('支出', fmtCurrency(m.expense), '')
+      + mkStat('収支', fmtCurrency(m.profit), '', m.profit >= 0 ? 'success' : 'danger')
+      + mkStat('稼働時間', fmtHours(m.hours), '')
+      + mkStat('実績時給', fmtCurrency(m.hourly), '')
+      + '</div>';
+    if (m.targetRevenue > 0) {
+      var rate = m.achieveRate;
+      html += '<div class="progress-wrap"><div class="progress-label"><span>目標達成率 ' + fmtCurrency(m.targetRevenue) + '</span><span>' + rate + '%</span></div>'
+        + '<div class="progress-bar"><div class="progress-fill' + (rate >= 100 ? ' over' : '') + '" style="width:' + Math.min(100,rate) + '%"></div></div></div>';
+    } else {
+      html += '<p style="margin-top:8px;font-size:12px;color:var(--gray-5);">月次目標未設定 — <span style="color:var(--primary);cursor:pointer;" onclick="navigate(\'finance\')">収支管理</span>から設定できます。</p>';
+    }
+    html += '</div>';
+
+    // 年次サマリー
+    var y = d.yearly;
+    html += '<div class="card"><div class="card-title">' + APP.dashYear + '年 年次サマリー</div><div class="stats-grid">'
+      + mkStat('年間収入', fmtCurrency(y.revenue), '', 'highlight')
+      + mkStat('年間支出', fmtCurrency(y.expense), '')
+      + mkStat('年間収支', fmtCurrency(y.profit), '', y.profit >= 0 ? 'success' : 'danger')
+      + mkStat('年間稼働', fmtHours(y.hours), '')
+      + mkStat('年間時給', fmtCurrency(y.hourly), '')
+      + mkStat('累計収入', fmtCurrency(d.totalRevenue), '')
+      + '</div></div>';
+
+    // グラフ
+    html += '<div class="chart-grid">'
+      + '<div class="card"><div class="card-title">' + APP.dashYear + '年 月次収入推移</div><div class="chart-container"><canvas id="chart-monthly"></canvas></div></div>'
+      + '<div class="card"><div class="card-title">プラットフォーム別収入</div><div class="chart-container"><canvas id="chart-platform"></canvas></div></div>'
+      + '</div>';
+
+    // 進行中案件
+    html += '<div class="card"><div class="card-title" style="display:flex;justify-content:space-between;align-items:center;"><span>進行中案件（ステイ中）</span>'
+      + '<button class="btn btn-secondary btn-sm" onclick="navigate(\'projects\',{tab:\'active\'})">一覧で見る</button></div>';
+    if (d.activeProjects.length === 0) {
+      html += '<div class="empty-state">進行中の案件はありません</div>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>案件名</th><th>担当者</th><th>プラットフォーム</th><th>提案日</th><th>報酬</th><th>タスク</th></tr></thead><tbody>';
+      d.activeProjects.forEach(function(p) {
+        html += '<tr class="clickable-row" onclick="navigate(\'project-detail\',{id:\'' + p.id + '\'})">'
+          + '<td><strong>' + escHtml(truncate(p.name,30)) + '</strong></td>'
+          + '<td>' + escHtml(p.contact) + '</td>'
+          + '<td>' + escHtml(p.platform) + '</td>'
+          + '<td>' + fmtDate(p.proposalDate) + '</td>'
+          + '<td class="text-right">' + (p.reward > 0 ? fmtCurrency(p.reward) : '-') + '</td>'
+          + '<td class="text-ellipsis">' + escHtml(truncate(p.tasks,40)) + '</td>'
+          + '</tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+
+    el.innerHTML = html;
+    initMonthlyChart(d.monthlyChart, months);
+    initPlatformChart(d.platformChart);
+  }).catch(function(e) {
+    showToast('ダッシュボード読み込み失敗: ' + e.message, 'error');
+  }).finally(function() { showLoading(false); });
+}
+
+function mkStat(label, value, sub, cls) {
+  return '<div class="stat-card' + (cls ? ' ' + cls : '') + '"><div class="stat-label">' + label + '</div><div class="stat-value">' + value + '</div>' + (sub ? '<div class="stat-sub">' + sub + '</div>' : '') + '</div>';
+}
+function setDashPeriod(y, m) { APP.dashYear = y; APP.dashMonth = m; renderDashboard(); }
+
+function destroyChart(key) {
+  if (APP.charts[key]) { APP.charts[key].destroy(); delete APP.charts[key]; }
+}
+function initMonthlyChart(data, months) {
+  destroyChart('monthly');
+  var ctx = document.getElementById('chart-monthly');
+  if (!ctx) return;
+  APP.charts.monthly = new Chart(ctx, {
+    data: {
+      labels: months,
+      datasets: [
+        { type:'bar',  label:'実績収入', data: data.map(function(d){return d.revenue;}), backgroundColor:'rgba(59,91,219,0.7)', borderRadius:4 },
+        { type:'line', label:'目標',     data: data.map(function(d){return d.target;}),  borderColor:'#FA5252', borderWidth:2, pointRadius:3, fill:false, tension:0 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{ position:'bottom', labels:{ boxWidth:12, font:{size:11} } } },
+      scales:{
+        y:{ ticks:{ callback:function(v){ return '¥'+v.toLocaleString('ja-JP'); }, font:{size:11} } },
+        x:{ ticks:{ font:{size:11} } }
+      }
+    }
+  });
+}
+function initPlatformChart(data) {
+  destroyChart('platform');
+  var ctx = document.getElementById('chart-platform');
+  if (!ctx) return;
+  if (!data || data.length === 0) { ctx.parentElement.innerHTML = '<div class="empty-state">データなし</div>'; return; }
+  var colors = ['#3B5BDB','#339AF0','#40C057','#FAB005','#FA5252','#7950F2','#F06595','#20C997','#FD7E14','#74C0FC'];
+  APP.charts.platform = new Chart(ctx, {
+    type:'doughnut',
+    data:{
+      labels: data.map(function(d){return d.name;}),
+      datasets:[{ data: data.map(function(d){return d.revenue;}), backgroundColor: data.map(function(_,i){return colors[i%colors.length];}) }]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{
+        legend:{ position:'bottom', labels:{ boxWidth:12, font:{size:11} } },
+        tooltip:{ callbacks:{ label:function(c){ return ' ' + fmtCurrency(c.parsed); } } }
+      }
+    }
+  });
+}
+
+// ==================================================================
+// PROJECT LIST
+// ==================================================================
+function renderProjectList() {
+  showLoading(true);
+  gasRun('getProjects', null).then(function(r) {
+    APP.projects = r.data || [];
+    _drawProjectList();
+  }).catch(function(e) {
+    showToast('案件一覧読み込み失敗: ' + e.message, 'error');
+  }).finally(function(){ showLoading(false); });
+}
+
+function _filterLocal(projects) {
+  var f = APP.filters;
+  var ps = projects.filter(function(p){ return !p.isDeleted; });
+  if (f.tab === 'active') ps = ps.filter(function(p){ return p.status === 'ステイ'; });
+  else if (f.tab === 'done')   ps = ps.filter(function(p){ return p.status === '完了'; });
+  else if (f.tab === 'closed') ps = ps.filter(function(p){ return ['不採用','辞退','連絡なし'].indexOf(p.status) >= 0; });
+  if (f.platform) ps = ps.filter(function(p){ return p.platform === f.platform; });
+  if (f.type)     ps = ps.filter(function(p){ return p.type === f.type; });
+  if (f.contact)  ps = ps.filter(function(p){ return p.contact.indexOf(f.contact) >= 0; });
+  if (f.keyword) {
+    var kw = f.keyword.toLowerCase();
+    ps = ps.filter(function(p){
+      return (p.name||'').toLowerCase().indexOf(kw) >= 0
+        || (p.contact||'').toLowerCase().indexOf(kw) >= 0
+        || (p.memo||'').toLowerCase().indexOf(kw) >= 0
+        || (p.tasks||'').toLowerCase().indexOf(kw) >= 0;
+    });
+  }
+  if (f.sortBy) {
+    var dir = f.sortDir === 'asc' ? 1 : -1;
+    ps.sort(function(a,b){
+      var av = a[f.sortBy] != null ? a[f.sortBy] : '';
+      var bv = b[f.sortBy] != null ? b[f.sortBy] : '';
+      if (typeof av === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv), 'ja') * dir;
+    });
+  }
+  return ps;
+}
+
+function _drawProjectList() {
+  var el = document.getElementById('view-projects');
+  var f = APP.filters;
+  var all = APP.projects;
+  var filtered = _filterLocal(all);
+  var m = APP.masterData;
+  var counts = {
+    all: all.length,
+    active: all.filter(function(p){ return p.status==='ステイ'; }).length,
+    done:   all.filter(function(p){ return p.status==='完了'; }).length,
+    closed: all.filter(function(p){ return ['不採用','辞退','連絡なし'].indexOf(p.status)>=0; }).length
+  };
+
+  function sortTh(label, key) {
+    var cls = 'sortable';
+    if (f.sortBy === key) cls += f.sortDir === 'asc' ? ' sort-asc' : ' sort-desc';
+    return '<th class="' + cls + '" onclick="sortBy(\'' + key + '\')">' + label + '</th>';
+  }
+
+  var html = '<div class="page-header"><div class="page-title">案件一覧</div>'
+    + '<button class="btn btn-primary" onclick="navigate(\'project-form\',{mode:\'new\'})">+ 新規登録</button></div>'
+    + '<div class="card">'
+    + '<div class="tab-bar">'
+    + mkTab('全件', 'all', counts.all, f.tab)
+    + mkTab('進行中', 'active', counts.active, f.tab)
+    + mkTab('完了', 'done', counts.done, f.tab)
+    + mkTab('不採用・辞退・連絡なし', 'closed', counts.closed, f.tab)
+    + '</div>'
+    + '<div class="filter-bar">'
+    + '<input type="text" placeholder="フリーワード..." value="' + escHtml(f.keyword) + '" oninput="setFilter(\'keyword\',this.value)">'
+    + '<select onchange="setFilter(\'platform\',this.value)"><option value="">全プラットフォーム</option>'
+    + m.platforms.map(function(p){ return '<option value="' + escHtml(p) + '"' + (f.platform===p?' selected':'') + '>' + escHtml(p) + '</option>'; }).join('')
+    + '</select>'
+    + '<select onchange="setFilter(\'type\',this.value)"><option value="">全種別</option>'
+    + m.types.map(function(t){ return '<option value="' + escHtml(t) + '"' + (f.type===t?' selected':'') + '>' + escHtml(t) + '</option>'; }).join('')
+    + '</select>'
+    + '<input type="text" placeholder="担当者名..." value="' + escHtml(f.contact) + '" oninput="setFilter(\'contact\',this.value)" style="min-width:120px;">'
+    + '<button class="btn btn-secondary btn-sm" onclick="clearFilters()">クリア</button>'
+    + '<span style="margin-left:auto;color:var(--gray-5);font-size:12px;">' + filtered.length + '件</span>'
+    + '</div>';
+
+  if (filtered.length === 0) {
+    html += '<div class="empty-state">案件が見つかりません</div>';
+  } else {
+    html += '<div class="table-wrap"><table><thead><tr>'
+      + '<th>案件ID</th><th>案件名</th><th>担当者</th><th>プラットフォーム</th><th>種別</th><th>ステータス</th>'
+      + sortTh('提案日','proposalDate') + sortTh('納品日','deliveryDate') + sortTh('検収日','acceptanceDate')
+      + sortTh('報酬','reward') + sortTh('時給','hourly')
+      + '<th>タスク</th><th></th></tr></thead><tbody>';
+    filtered.forEach(function(p) {
+      html += '<tr class="clickable-row" onclick="navigate(\'project-detail\',{id:\'' + p.id + '\'})">'
+        + '<td class="text-muted">' + escHtml(p.id) + '</td>'
+        + '<td><strong>' + escHtml(truncate(p.name,28)) + '</strong></td>'
+        + '<td>' + escHtml(p.contact) + '</td>'
+        + '<td>' + escHtml(p.platform) + '</td>'
+        + '<td>' + escHtml(p.type) + '</td>'
+        + '<td>' + statusBadge(p.status) + '</td>'
+        + '<td>' + fmtDate(p.proposalDate) + '</td>'
+        + '<td>' + fmtDate(p.deliveryDate) + '</td>'
+        + '<td>' + fmtDate(p.acceptanceDate) + '</td>'
+        + '<td class="text-right">' + (p.reward > 0 ? fmtCurrency(p.reward) : '-') + '</td>'
+        + '<td class="text-right">' + (p.hourly > 0 ? fmtCurrency(p.hourly) : '-') + '</td>'
+        + '<td class="text-ellipsis">' + escHtml(truncate(p.tasks,28)) + '</td>'
+        + '<td onclick="event.stopPropagation()">'
+        + '<button class="btn btn-secondary btn-sm" onclick="navigate(\'project-form\',{mode:\'edit\',id:\'' + p.id + '\'})">編集</button>'
+        + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function mkTab(label, key, count, active) {
+  return '<button class="tab' + (active===key?' active':'') + '" onclick="setFilter(\'tab\',\'' + key + '\')">'
+    + label + '<span class="tab-count">' + count + '</span></button>';
+}
+function setFilter(key, val) { APP.filters[key] = val; _drawProjectList(); }
+function clearFilters() { APP.filters.platform=''; APP.filters.type=''; APP.filters.contact=''; APP.filters.keyword=''; _drawProjectList(); }
+function sortBy(key) {
+  if (APP.filters.sortBy === key) APP.filters.sortDir = APP.filters.sortDir === 'asc' ? 'desc' : 'asc';
+  else { APP.filters.sortBy = key; APP.filters.sortDir = 'desc'; }
+  _drawProjectList();
+}
+
+// ==================================================================
+// PROJECT DETAIL
+// ==================================================================
+function renderProjectDetail(id) {
+  showLoading(true);
+  gasRun('getProject', id).then(function(r) {
+    var p = r.data;
+    var el = document.getElementById('view-project-detail');
+    var backId = p.id;
+
+    var html = '<div class="breadcrumb"><span onclick="navigate(\'projects\')">案件一覧</span> &rsaquo; 案件詳細</div>'
+      + '<div class="page-header"><div class="page-title">' + escHtml(p.name) + '</div>'
+      + '<div style="display:flex;gap:8px;">'
+      + '<button class="btn btn-secondary" onclick="navigate(\'project-form\',{mode:\'edit\',id:\'' + backId + '\'})">編集</button>'
+      + '<button class="btn btn-danger" onclick="confirmDelete(\'' + backId + '\',\'' + escHtml(p.name).replace(/'/g,"\\'") + '\')">削除</button>'
+      + '</div></div>';
+
+    html += '<div class="card"><div class="card-title">基本情報</div><div class="detail-grid">'
+      + di('案件ID', escHtml(p.id))
+      + di('ステータス', statusBadge(p.status))
+      + di('案件名', escHtml(p.name), true)
+      + di('担当者', escHtml(p.contact))
+      + di('プラットフォーム', escHtml(p.platform))
+      + di('種別', escHtml(p.type))
+      + di('提案日', fmtDate(p.proposalDate))
+      + di('納品日', fmtDate(p.deliveryDate))
+      + di('検収日', fmtDate(p.acceptanceDate))
+      + di('案件URL', p.url ? '<a href="' + escHtml(p.url) + '" target="_blank">' + escHtml(truncate(p.url,60)) + '</a>' : '-', false, true)
+      + di('連絡先URL', p.contactUrl ? '<a href="' + escHtml(p.contactUrl) + '" target="_blank">' + escHtml(truncate(p.contactUrl,60)) + '</a>' : '-', false, true)
+      + '</div></div>';
+
+    html += '<div class="card"><div class="card-title">報酬・稼働</div><div class="detail-grid">'
+      + di('報酬', '<strong>' + fmtCurrency(p.reward) + '</strong>')
+      + di('稼働時間', fmtHours(p.hours))
+      + di('時給（自動計算）', '<strong style="color:var(--primary)">' + fmtCurrency(p.hourly) + '</strong>')
+      + di('請求書対象', p.isInvoice ? '<span class="badge badge-done">対象</span>' : '-')
+      + '</div></div>';
+
+    if (p.tasks || p.memo || p.docs) {
+      html += '<div class="card"><div class="card-title">タスク・メモ</div><div class="detail-grid">'
+        + di('タスク', '<pre style="font-family:inherit;white-space:pre-wrap;font-size:13px;">' + escHtml(p.tasks || '-') + '</pre>', true)
+        + di('メモ', '<pre style="font-family:inherit;white-space:pre-wrap;font-size:13px;">' + escHtml(p.memo || '-') + '</pre>', true);
+      if (p.docs) {
+        var docLinks = p.docs.split('\n').map(function(u){ u=u.trim(); return u ? '<a href="' + escHtml(u) + '" target="_blank">' + escHtml(u) + '</a>' : ''; }).filter(Boolean).join('<br>');
+        html += di('関連資料', docLinks || '-', true, true);
+      }
+      html += '</div></div>';
+    }
+
+    html += '<div style="padding-bottom:24px;"><button class="btn btn-secondary" onclick="navigate(\'projects\')">一覧に戻る</button></div>';
+    el.innerHTML = html;
+  }).catch(function(e) {
+    showToast('案件読み込み失敗: ' + e.message, 'error');
+    navigate('projects');
+  }).finally(function(){ showLoading(false); });
+}
+
+function di(label, value, full, isLink) {
+  return '<div class="detail-item' + (full?' full':'') + (isLink?' link-cell':'') + '">'
+    + '<div class="detail-label">' + label + '</div>'
+    + '<div class="detail-value">' + value + '</div></div>';
+}
+function confirmDelete(id, name) {
+  showModal('案件の削除', '「' + name + '」を削除しますか？（論理削除のためデータは保持されます）', [
+    { label:'キャンセル', cls:'btn-secondary', action: hideModal },
+    { label:'削除する',   cls:'btn-danger',    action: function(){ doDelete(id); } }
+  ]);
+}
+function doDelete(id) {
+  hideModal();
+  showLoading(true);
+  gasRun('deleteProject', id).then(function() {
+    showToast('削除しました', 'success');
+    APP.projects = [];
+    navigate('projects');
+  }).catch(function(e){ showToast('削除失敗: ' + e.message, 'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+// ==================================================================
+// PROJECT FORM
+// ==================================================================
+function renderProjectForm(params) {
+  params = params || { mode:'new' };
+  var isEdit = params.mode === 'edit';
+
+  var blank = { id:'',name:'',contact:'',platform:'',url:'',contactUrl:'',type:'',proposalDate:'',status:'ステイ',deliveryDate:'',acceptanceDate:'',reward:'',hours:'',hourly:0,tasks:'',memo:'',docs:'',isInvoice:false,createdAt:'' };
+
+  function drawForm(p) {
+    var m = APP.masterData;
+    var el = document.getElementById('view-project-form');
+    var titleLabel = isEdit ? '案件編集' : '新規案件登録';
+
+    var html = '<div class="breadcrumb"><span onclick="navigate(\'projects\')">案件一覧</span>'
+      + (isEdit ? ' &rsaquo; <span onclick="navigate(\'project-detail\',{id:\'' + p.id + '\'})">' + escHtml(truncate(p.name,20)) + '</span> &rsaquo; 編集' : ' &rsaquo; 新規登録')
+      + '</div><div class="page-title" style="margin-bottom:16px;">' + titleLabel + '</div>'
+      + '<form id="pform" onsubmit="submitForm(event)">';
+
+    // 基本情報
+    html += '<div class="card"><div class="card-title">基本情報</div><div class="form-grid">'
+      + fg('案件名', '<input class="form-control" type="text" name="name" value="' + escHtml(p.name) + '" required><div class="form-error">案件名は必須です</div>', true)
+      + fg('担当者', '<input class="form-control" type="text" name="contact" value="' + escHtml(p.contact) + '">')
+      + fg('プラットフォーム', '<select class="form-control" name="platform"><option value="">-- 選択 --</option>' + m.platforms.map(function(v){ return '<option value="' + escHtml(v) + '"' + (p.platform===v?' selected':'') + '>' + escHtml(v) + '</option>'; }).join('') + '</select>')
+      + fg('種別', '<select class="form-control" name="type"><option value="">-- 選択 --</option>' + m.types.map(function(v){ return '<option value="' + escHtml(v) + '"' + (p.type===v?' selected':'') + '>' + escHtml(v) + '</option>'; }).join('') + '</select>')
+      + fg('ステータス', '<select class="form-control" name="status" onchange="onStatusChange(this.value)">' + m.statuses.map(function(v){ return '<option value="' + escHtml(v) + '"' + (p.status===v?' selected':'') + '>' + escHtml(v) + '</option>'; }).join('') + '</select>')
+      + fg('提案日 / 相談日', '<input class="form-control" type="date" name="proposalDate" value="' + (p.proposalDate||'') + '">')
+      + fg('納品日', '<input class="form-control" type="date" name="deliveryDate" id="inp-delivery" value="' + (p.deliveryDate||'') + '"><div class="form-error" id="err-delivery">完了ステータスでは必須です</div>')
+      + fg('検収日', '<input class="form-control" type="date" name="acceptanceDate" id="inp-acceptance" value="' + (p.acceptanceDate||'') + '"><div class="form-error" id="err-acceptance">完了ステータスでは必須です</div>')
+      + fg('案件URL', '<input class="form-control" type="url" name="url" value="' + escHtml(p.url) + '" placeholder="https://">')
+      + fg('連絡先URL（Slack/LINE等）', '<input class="form-control" type="text" name="contactUrl" value="' + escHtml(p.contactUrl) + '">')
+      + '</div></div>';
+
+    // 報酬
+    var hourlyDisplay = p.hourly > 0 ? '¥' + Number(p.hourly).toLocaleString('ja-JP') : '-';
+    html += '<div class="card"><div class="card-title">報酬・稼働</div><div class="form-grid">'
+      + fg('報酬（円）', '<input class="form-control" type="number" name="reward" min="0" value="' + (p.reward||'') + '" placeholder="0" oninput="calcHourly()">')
+      + fg('稼働時間（h）', '<input class="form-control" type="number" name="hours" min="0" step="0.5" value="' + (p.hours||'') + '" placeholder="0" oninput="calcHourly()">')
+      + fg('時給（自動計算）', '<input class="form-control" type="text" id="hourly-disp" readonly value="' + hourlyDisplay + '">')
+      + '<div class="form-group" style="align-self:end;"><label style="display:flex;align-items:center;gap:8px;cursor:pointer;"><input type="checkbox" name="isInvoice"' + (p.isInvoice?' checked':'') + '> <span>請求書対象</span></label></div>'
+      + '</div></div>';
+
+    // タスク・メモ
+    html += '<div class="card"><div class="card-title">タスク・メモ</div><div class="form-grid">'
+      + fg('タスク（残作業）', '<textarea class="form-control" name="tasks" rows="3">' + escHtml(p.tasks) + '</textarea>', true)
+      + fg('メモ（経緯・交渉内容等）', '<textarea class="form-control" name="memo" rows="4">' + escHtml(p.memo) + '</textarea>', true)
+      + fg('関連資料URL（改行区切りで複数可）', '<textarea class="form-control" name="docs" rows="3" placeholder="https://">' + escHtml(p.docs) + '</textarea>', true)
+      + '</div></div>';
+
+    html += '<input type="hidden" name="id" value="' + escHtml(p.id) + '">'
+      + '<input type="hidden" name="createdAt" value="' + escHtml(p.createdAt) + '">'
+      + '<div id="form-warn" style="display:none;color:var(--warning);font-size:13px;padding:10px;background:#FFF9DB;border-radius:var(--radius);margin-bottom:8px;"></div>'
+      + '<div class="form-actions" style="padding-bottom:24px;">'
+      + '<button type="submit" class="btn btn-primary">' + (isEdit ? '更新する' : '登録する') + '</button>'
+      + '<button type="button" class="btn btn-secondary" onclick="navigate(\'' + (isEdit ? 'project-detail\',{id:\'' + p.id + '\'}' : 'projects\'') + '")>キャンセル</button>'
+      + '</div></form>';
+
+    el.innerHTML = html;
+    if (p.status) onStatusChange(p.status);
+  }
+
+  if (isEdit && params.id) {
+    showLoading(true);
+    gasRun('getProject', params.id).then(function(r){ drawForm(r.data); })
+      .catch(function(e){ showToast('読み込み失敗: '+e.message,'error'); navigate('projects'); })
+      .finally(function(){ showLoading(false); });
+  } else {
+    drawForm(blank);
+  }
+}
+
+function fg(label, input, full) {
+  return '<div class="form-group' + (full?' full':'') + '"><label class="form-label">' + label + '</label>' + input + '</div>';
+}
+function onStatusChange(status) {
+  var d = document.getElementById('inp-delivery');
+  var a = document.getElementById('inp-acceptance');
+  if (!d) return;
+  if (status === '完了') {
+    d.parentElement.querySelector('.form-label') && (d.parentElement.querySelector('.form-label').classList.add('required'));
+    a.parentElement.querySelector('.form-label') && (a.parentElement.querySelector('.form-label').classList.add('required'));
+  } else {
+    d.classList.remove('invalid'); a.classList.remove('invalid');
+  }
+}
+function calcHourly() {
+  var reward = parseFloat(document.querySelector('[name=reward]').value) || 0;
+  var hours  = parseFloat(document.querySelector('[name=hours]').value)  || 0;
+  var disp   = document.getElementById('hourly-disp');
+  if (disp) disp.value = hours > 0 ? '¥' + Math.round(reward/hours).toLocaleString('ja-JP') : '-';
+}
+function submitForm(event) {
+  event.preventDefault();
+  var form = event.target;
+  var warn = document.getElementById('form-warn');
+  var name   = form.name.value.trim();
+  var contact = form.contact.value.trim();
+  var status = form.status.value;
+  var delivery   = form.deliveryDate.value;
+  var acceptance = form.acceptanceDate.value;
+  var valid = true;
+
+  var nameEl = form.querySelector('[name=name]');
+  if (!name) { nameEl.classList.add('invalid'); valid = false; } else { nameEl.classList.remove('invalid'); }
+
+  if (status === '完了') {
+    var dEl = document.getElementById('inp-delivery');
+    var aEl = document.getElementById('inp-acceptance');
+    if (!delivery)   { dEl.classList.add('invalid'); valid = false; } else { dEl.classList.remove('invalid'); }
+    if (!acceptance) { aEl.classList.add('invalid'); valid = false; } else { aEl.classList.remove('invalid'); }
+  }
+
+  if (!valid) { showToast('入力内容を確認してください','error'); return; }
+
+  if (name && contact && name === contact) {
+    warn.textContent = '警告: 案件名と担当者名が同じです。登録ミスの可能性があります。';
+    warn.style.display = 'block';
+  } else {
+    warn.style.display = 'none';
+  }
+
+  var data = {
+    id:             form.id.value,
+    name:           name,
+    contact:        contact,
+    platform:       form.platform.value,
+    url:            form.url.value.trim(),
+    contactUrl:     form.contactUrl.value.trim(),
+    type:           form.type.value,
+    proposalDate:   form.proposalDate.value,
+    status:         status,
+    deliveryDate:   delivery,
+    acceptanceDate: acceptance,
+    reward:         parseFloat(form.reward.value) || 0,
+    hours:          parseFloat(form.hours.value)  || 0,
+    tasks:          form.tasks.value.trim(),
+    memo:           form.memo.value.trim(),
+    docs:           form.docs.value.trim(),
+    isInvoice:      form.isInvoice.checked,
+    createdAt:      form.createdAt.value
+  };
+
+  showLoading(true);
+  gasRun('saveProject', JSON.stringify(data)).then(function(r) {
+    showToast(data.id ? '案件を更新しました' : '案件を登録しました', 'success');
+    APP.projects = [];
+    navigate('project-detail', { id: r.data.id });
+  }).catch(function(e){ showToast('保存失敗: '+e.message,'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+// ==================================================================
+// FINANCE
+// ==================================================================
+function renderFinance() {
+  showLoading(true);
+  Promise.all([gasRun('getProjects', null), gasRun('getFinanceSettings')]).then(function(results) {
+    var allProjects = results[0].data || [];
+    var finSettings = results[1].data || [];
+    _drawFinance(allProjects, finSettings);
+  }).catch(function(e){ showToast('収支読み込み失敗: '+e.message,'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+function _drawFinance(allProjects, finSettings) {
+  var y = APP.finYear, mo = APP.finMonth;
+  var ym = String(y) + '-' + String(mo).padStart(2,'0');
+  var fSet = finSettings.find(function(f){ return f.yearMonth===ym; }) || { yearMonth:ym, targetRevenue:0, expense:0 };
+
+  var mps = allProjects.filter(function(p){ return p.acceptanceDate && p.acceptanceDate.indexOf(ym)===0; });
+  var mRev = mps.reduce(function(s,p){ return s+p.reward; }, 0);
+  var mHrs = mps.reduce(function(s,p){ return s+p.hours; }, 0);
+  var mHrly = mHrs > 0 ? Math.round(mRev/mHrs) : 0;
+  var rate = fSet.targetRevenue > 0 ? Math.min(100, Math.round(mRev/fSet.targetRevenue*100)) : null;
+
+  var yStr = String(y);
+  var yps = allProjects.filter(function(p){ return p.acceptanceDate && p.acceptanceDate.indexOf(yStr)===0; });
+  var yRev = yps.reduce(function(s,p){ return s+p.reward; },0);
+  var yHrs = yps.reduce(function(s,p){ return s+p.hours; },0);
+  var yExp = finSettings.filter(function(f){ return f.yearMonth.indexOf(yStr)===0; }).reduce(function(s,f){ return s+f.expense; },0);
+
+  var py = y, pm = mo-1; if (pm<1){ pm=12; py--; }
+  var ny = y, nm = mo+1; if (nm>12){ nm=1; ny++; }
+
+  var el = document.getElementById('view-finance');
+  var html = '<div class="page-header"><div class="page-title">収支管理</div></div>'
+    + '<div class="card"><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">'
+    + '<button class="btn btn-secondary btn-sm" onclick="setFinPeriod(' + py + ',' + pm + ')">前月</button>'
+    + '<strong style="font-size:15px;">' + y + '年' + mo + '月</strong>'
+    + '<button class="btn btn-secondary btn-sm" onclick="setFinPeriod(' + ny + ',' + nm + ')">翌月</button>'
+    + '<span style="color:var(--gray-3);">|</span>'
+    + '<button class="btn btn-secondary btn-sm" onclick="setFinPeriod(' + (y-1) + ',' + mo + ')">' + (y-1) + '年</button>'
+    + '<button class="btn btn-secondary btn-sm" onclick="setFinPeriod(' + (y+1) + ',' + mo + ')">' + (y+1) + '年</button>'
+    + '</div></div>';
+
+  // 月次サマリー
+  html += '<div class="card"><div class="card-title">' + y + '年' + mo + '月 収支サマリー</div><div class="stats-grid">'
+    + mkStat('収入', fmtCurrency(mRev), '', 'highlight')
+    + mkStat('支出', fmtCurrency(fSet.expense), '')
+    + mkStat('収支', fmtCurrency(mRev - fSet.expense), '', mRev - fSet.expense >= 0 ? 'success' : 'danger')
+    + mkStat('稼働時間', fmtHours(mHrs), '')
+    + mkStat('実績時給', fmtCurrency(mHrly), '')
+    + mkStat('目標収入', fmtCurrency(fSet.targetRevenue), '')
+    + '</div>';
+  if (rate !== null) {
+    html += '<div class="progress-wrap" style="margin-top:12px;">'
+      + '<div class="progress-label"><span>目標達成率</span><span>' + rate + '%</span></div>'
+      + '<div class="progress-bar"><div class="progress-fill' + (rate>=100?' over':'') + '" style="width:' + rate + '%"></div></div></div>';
+  }
+  html += '</div>';
+
+  // 月次設定フォーム
+  html += '<div class="card"><div class="card-title">' + y + '年' + mo + '月 設定</div><div class="form-grid">'
+    + fg('月次目標収入（円）', '<input class="form-control" type="number" min="0" id="fin-target" value="' + fSet.targetRevenue + '">')
+    + fg('月次支出（円）', '<input class="form-control" type="number" min="0" id="fin-expense" value="' + fSet.expense + '"><div class="form-hint">スクール費・ツール費等</div>')
+    + '</div><div class="form-actions"><button class="btn btn-primary" onclick="saveFinSetting(\'' + ym + '\')">保存</button></div></div>';
+
+  // 年次サマリー
+  html += '<div class="card"><div class="card-title">' + y + '年 年次サマリー</div><div class="stats-grid">'
+    + mkStat('年間収入', fmtCurrency(yRev), '', 'highlight')
+    + mkStat('年間支出', fmtCurrency(yExp), '')
+    + mkStat('年間収支', fmtCurrency(yRev-yExp), '', yRev-yExp>=0?'success':'danger')
+    + mkStat('年間稼働', fmtHours(yHrs), '')
+    + mkStat('年間時給', fmtCurrency(yHrs>0?Math.round(yRev/yHrs):0), '')
+    + '</div></div>';
+
+  // 月別テーブル
+  html += '<div class="card"><div class="card-title">' + y + '年 月別収支</div><div class="table-wrap"><table>'
+    + '<thead><tr><th>月</th><th class="text-right">収入</th><th class="text-right">支出</th><th class="text-right">収支</th><th class="text-right">稼働</th><th class="text-right">時給</th><th class="text-right">目標</th><th class="text-right">達成率</th></tr></thead><tbody>';
+  for (var i = 1; i <= 12; i++) {
+    var mym = yStr + '-' + String(i).padStart(2,'0');
+    var imps = allProjects.filter(function(p){ return p.acceptanceDate && p.acceptanceDate.indexOf(mym)===0; });
+    var iRev = imps.reduce(function(s,p){ return s+p.reward; },0);
+    var iHrs = imps.reduce(function(s,p){ return s+p.hours; },0);
+    var iSet = finSettings.find(function(f){ return f.yearMonth===mym; }) || { targetRevenue:0, expense:0 };
+    var iRate = iSet.targetRevenue > 0 ? Math.min(100,Math.round(iRev/iSet.targetRevenue*100)) : null;
+    html += '<tr' + (i===mo?' style="background:var(--gray-1);font-weight:600;"':'') + '>'
+      + '<td>' + i + '月</td>'
+      + '<td class="text-right">' + (iRev>0?fmtCurrency(iRev):'-') + '</td>'
+      + '<td class="text-right">' + (iSet.expense>0?fmtCurrency(iSet.expense):'-') + '</td>'
+      + '<td class="text-right">' + (iRev>0||iSet.expense>0?fmtCurrency(iRev-iSet.expense):'-') + '</td>'
+      + '<td class="text-right">' + (iHrs>0?fmtHours(iHrs):'-') + '</td>'
+      + '<td class="text-right">' + (iHrs>0?fmtCurrency(Math.round(iRev/iHrs)):'-') + '</td>'
+      + '<td class="text-right">' + (iSet.targetRevenue>0?fmtCurrency(iSet.targetRevenue):'-') + '</td>'
+      + '<td class="text-right">' + (iRate!==null?iRate+'%':'-') + '</td></tr>';
+  }
+  html += '</tbody></table></div></div>';
+  el.innerHTML = html;
+}
+
+function setFinPeriod(y, m) { APP.finYear = y; APP.finMonth = m; renderFinance(); }
+function saveFinSetting(ym) {
+  var target  = parseFloat(document.getElementById('fin-target').value)  || 0;
+  var expense = parseFloat(document.getElementById('fin-expense').value) || 0;
+  showLoading(true);
+  gasRun('saveFinanceSetting', JSON.stringify({ yearMonth:ym, targetRevenue:target, expense:expense }))
+    .then(function(){ showToast('収支設定を保存しました','success'); renderFinance(); })
+    .catch(function(e){ showToast('保存失敗: '+e.message,'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+// ==================================================================
+// SETTINGS
+// ==================================================================
+function renderSettings() {
+  showLoading(true);
+  Promise.all([gasRun('getMasterData'), gasRun('getSpreadsheetUrl')]).then(function(results) {
+    var m = results[0].data;
+    var ssUrl = results[1].success ? results[1].data : null;
+    APP.masterData = m;
+    var el = document.getElementById('view-settings');
+    var html = '<div class="page-header"><div class="page-title">設定</div></div>';
+
+    if (ssUrl) {
+      html += '<div class="card"><div class="card-title">データストア</div>'
+        + '<p style="font-size:13px;color:var(--gray-7);margin-bottom:12px;">案件データはGoogleスプレッドシートに保存されています。</p>'
+        + '<a href="' + escHtml(ssUrl) + '" target="_blank" class="btn btn-secondary">スプレッドシートを開く</a></div>';
+    }
+
+    html += '<div class="card"><div class="card-title">マスタデータ</div><div class="two-col">'
+      + '<div><div style="font-size:12px;font-weight:600;color:var(--gray-5);margin-bottom:8px;">プラットフォーム</div><ul style="list-style:none;padding:0;">' + m.platforms.map(function(v){ return '<li style="padding:4px 0;border-bottom:1px solid var(--gray-2);">' + escHtml(v) + '</li>'; }).join('') + '</ul></div>'
+      + '<div><div style="font-size:12px;font-weight:600;color:var(--gray-5);margin-bottom:8px;">種別</div><ul style="list-style:none;padding:0;">' + m.types.map(function(v){ return '<li style="padding:4px 0;border-bottom:1px solid var(--gray-2);">' + escHtml(v) + '</li>'; }).join('') + '</ul></div>'
+      + '</div>'
+      + '<div style="margin-top:16px;"><div style="font-size:12px;font-weight:600;color:var(--gray-5);margin-bottom:8px;">ステータス</div><div style="display:flex;gap:8px;flex-wrap:wrap;">' + m.statuses.map(function(v){ return statusBadge(v); }).join('') + '</div></div>'
+      + '<p style="margin-top:12px;font-size:12px;color:var(--gray-5);">マスタ変更はスプレッドシートの「マスタ」シートを直接編集してください。</p>'
+      + '</div>';
+
+    html += '<div class="card"><div class="card-title">CSVエクスポート</div>'
+      + '<p style="font-size:13px;color:var(--gray-7);margin-bottom:12px;">完了案件のうち請求書対象にチェックがついた案件をCSV出力します。</p>'
+      + '<button class="btn btn-secondary" onclick="exportCSV()">請求書対象案件 CSV出力</button></div>';
+
+    el.innerHTML = html;
+  }).catch(function(e){ showToast('設定読み込み失敗: '+e.message,'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+function exportCSV() {
+  showLoading(true);
+  gasRun('exportInvoiceCSV').then(function(r) {
+    var blob = new Blob(['﻿' + r.data], { type:'text/csv;charset=utf-8;' });
+    var url  = URL.createObjectURL(blob);
+    var a    = document.createElement('a');
+    a.href = url; a.download = '請求書対象案件_' + new Date().toISOString().slice(0,10) + '.csv';
+    a.click(); URL.revokeObjectURL(url);
+    showToast('CSVをダウンロードしました','success');
+  }).catch(function(e){ showToast('CSV出力失敗: '+e.message,'error'); })
+    .finally(function(){ showLoading(false); });
+}
+
+// ==================================================================
+// UTILITIES
+// ==================================================================
+function showLoading(show) {
+  document.getElementById('loading-overlay').style.display = show ? 'flex' : 'none';
+}
+function showToast(msg, type) {
+  var c = document.getElementById('toast-container');
+  var t = document.createElement('div');
+  t.className = 'toast toast-' + (type||'info');
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(function(){ t.style.opacity='0'; t.style.transition='opacity .3s'; setTimeout(function(){ t.remove(); },300); }, 3000);
+}
+function showModal(title, body, actions) {
+  var content = document.getElementById('modal-body');
+  var btns = actions.map(function(a,i){
+    return '<button class="btn ' + a.cls + '" id="mbtn-' + i + '">' + escHtml(a.label) + '</button>';
+  }).join('');
+  content.innerHTML = '<div class="modal-title">' + escHtml(title) + '</div>'
+    + '<div class="modal-body">' + escHtml(body) + '</div>'
+    + '<div class="modal-actions">' + btns + '</div>';
+  actions.forEach(function(a,i){
+    var btn = document.getElementById('mbtn-' + i);
+    if (btn) btn.addEventListener('click', a.action);
+  });
+  document.getElementById('modal-overlay').style.display = 'flex';
+}
+function hideModal() {
+  document.getElementById('modal-overlay').style.display = 'none';
+}
+
+// ==================================================================
+// INIT
+// ==================================================================
+function initApp() {
+  showLoading(true);
+  gasRun('getMasterData').then(function(r) {
+    APP.masterData = r.data || { platforms:[], types:[], statuses:[] };
+    navigate('dashboard');
+  }).catch(function() {
+    document.getElementById('view-dashboard').innerHTML =
+      '<div class="card" style="text-align:center;padding:48px;">'
+      + '<h2 style="color:var(--danger);margin-bottom:12px;">セットアップが必要です</h2>'
+      + '<p style="color:var(--gray-7);margin-bottom:8px;">GASエディタで <code>setup()</code> を実行してスプレッドシートを作成してください。</p>'
+      + '<p style="color:var(--gray-5);font-size:12px;">実行後、ページを再読み込みすると起動します。</p>'
+      + '</div>';
+    showLoading(false);
+  }).finally(function(){ showLoading(false); });
+}
+
+document.addEventListener('DOMContentLoaded', initApp);
+</script>
