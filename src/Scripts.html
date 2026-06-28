@@ -711,9 +711,51 @@ function renderSettings() {
       + '<p style="font-size:13px;color:var(--gray-7);margin-bottom:12px;">完了案件のうち請求書対象にチェックがついた案件をCSV出力します。</p>'
       + '<button class="btn btn-secondary" onclick="exportCSV()">請求書対象案件 CSV出力</button></div>';
 
+    html += '<div class="card"><div class="card-title">過去データのインポート</div>'
+      + '<p style="font-size:13px;color:var(--gray-7);margin-bottom:12px;">Excelから変換したJSONデータを貼り付けてインポートします。既存IDの案件はスキップされます。</p>'
+      + '<textarea id="import-json" rows="6" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:11px;padding:8px;border:1px solid var(--gray-3);border-radius:6px;resize:vertical;" placeholder=\'[{"id":"PRJ-001","name":"案件名",...}]\'></textarea>'
+      + '<div style="margin-top:10px;display:flex;gap:8px;align-items:center;">'
+      + '<button class="btn btn-primary" onclick="runImport()">インポート実行</button>'
+      + '<label style="font-size:13px;color:var(--gray-6);">または <input type="file" id="import-file" accept=".json" onchange="loadImportFile(this)" style="font-size:13px;"></label>'
+      + '</div>'
+      + '<div id="import-result" style="margin-top:10px;font-size:13px;"></div>'
+      + '</div>';
+
     el.innerHTML = html;
   }).catch(function(e){ showToast('設定読み込み失敗: '+e.message,'error'); })
     .finally(function(){ showLoading(false); });
+}
+
+function loadImportFile(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    document.getElementById('import-json').value = e.target.result;
+  };
+  reader.readAsText(file, 'UTF-8');
+}
+
+function runImport() {
+  var json = document.getElementById('import-json').value.trim();
+  if (!json) { showToast('JSONを入力してください', 'error'); return; }
+  var resultEl = document.getElementById('import-result');
+  resultEl.innerHTML = '<span style="color:var(--gray-5);">インポート中...</span>';
+  showLoading(true);
+  gasRun('bulkImportProjects', json)
+    .then(function(r) {
+      var d = r.data;
+      resultEl.innerHTML = '<span style="color:var(--success);">✓ インポート完了</span>'
+        + ' — 登録: <strong>' + d.imported + '件</strong>'
+        + '、スキップ（既存）: ' + d.skipped + '件'
+        + '、合計: ' + d.total + '件';
+      showToast('インポート完了: ' + d.imported + '件登録', 'success');
+    })
+    .catch(function(e) {
+      resultEl.innerHTML = '<span style="color:var(--danger);">エラー: ' + escHtml(e.message) + '</span>';
+      showToast('インポート失敗: ' + e.message, 'error');
+    })
+    .finally(function() { showLoading(false); });
 }
 
 function exportCSV() {

@@ -458,6 +458,72 @@ function getSpreadsheetUrl() {
   }
 }
 
+// ---- 過去データ一括インポート ----
+
+function bulkImportProjects(jsonStr) {
+  try {
+    var projects = JSON.parse(jsonStr);
+    if (!Array.isArray(projects)) return { success: false, error: 'JSON配列が必要です' };
+
+    var sheet = getSheet(SHEET_PROJECTS);
+    var now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+
+    // 既存IDを収集（重複スキップ用）
+    var existingIds = {};
+    var lastRow = sheet.getLastRow();
+    if (lastRow > 1) {
+      sheet.getRange(2, 1, lastRow - 1, 1).getValues().forEach(function(r) {
+        if (r[0]) existingIds[String(r[0])] = true;
+      });
+    }
+
+    var imported = 0, skipped = 0;
+    var rows = [];
+
+    projects.forEach(function(p) {
+      if (existingIds[String(p.id)]) { skipped++; return; }
+
+      var reward  = parseFloat(p.reward)  || 0;
+      var hours   = parseFloat(p.hours)   || 0;
+      var hourly  = p.hourly ? parseFloat(p.hourly) : (hours > 0 ? Math.round(reward / hours) : 0);
+
+      rows.push([
+        p.id            || '',
+        p.name          || '',
+        p.contact       || '',
+        p.platform      || '',
+        p.url           || '',
+        p.contactUrl    || '',
+        p.type          || '',
+        p.proposalDate  || '',
+        p.status        || '',
+        p.deliveryDate  || '',
+        p.acceptanceDate || '',
+        reward,
+        hours,
+        hourly,
+        p.tasks         || '',
+        p.memo          || '',
+        p.docs          || '',
+        false,
+        false,
+        p.createdAt     || now,
+        now
+      ]);
+      imported++;
+    });
+
+    if (rows.length > 0) {
+      var startRow = sheet.getLastRow() + 1;
+      sheet.getRange(startRow, 1, rows.length, 21).setValues(rows);
+    }
+
+    return { success: true, data: { imported: imported, skipped: skipped, total: projects.length } };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+}
+
 // ---- CSVエクスポート（請求書対象） ----
 
 function exportInvoiceCSV() {
