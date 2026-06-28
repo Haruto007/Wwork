@@ -2,7 +2,7 @@
 // 副業案件管理アプリ - GASサーバーサイド
 // ============================================================
 
-const PROPS_SS_ID = 'SPREADSHEET_ID';
+const PROPS_SS_ID = '1LNeAbzn1QnaiqRNu-dgE51giQ0lfOz6cgOxZnnGVJIM';
 const SHEET_PROJECTS = '案件マスタ';
 const SHEET_FINANCE = '収支設定';
 const SHEET_MASTER = 'マスタ';
@@ -24,10 +24,7 @@ function include(filename) {
 // ---- スプレッドシート取得 ----
 
 function getSpreadsheet() {
-  const props = PropertiesService.getScriptProperties();
-  const ssId = props.getProperty(PROPS_SS_ID);
-  if (!ssId) throw new Error('setup() が未実行です。GASエディタから setup() を実行してください。');
-  return SpreadsheetApp.openById(ssId);
+  return SpreadsheetApp.openById(PROPS_SS_ID);
 }
 
 function getSheet(sheetName) {
@@ -37,17 +34,7 @@ function getSheet(sheetName) {
 // ---- セットアップ（GASエディタから1回実行） ----
 
 function setup() {
-  const props = PropertiesService.getScriptProperties();
-  let ssId = props.getProperty(PROPS_SS_ID);
-  let ss;
-
-  if (ssId) {
-    try { ss = SpreadsheetApp.openById(ssId); } catch (e) { ss = null; }
-  }
-  if (!ss) {
-    ss = SpreadsheetApp.create('副業案件管理DB');
-    props.setProperty(PROPS_SS_ID, ss.getId());
-  }
+  const ss = SpreadsheetApp.openById(PROPS_SS_ID);
 
   _initProjectSheet(ss);
   _initFinanceSheet(ss);
